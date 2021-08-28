@@ -13,6 +13,8 @@
 #ifndef ZUTIL_H
 #define ZUTIL_H
 
+#include <malloc.h>
+
 #define ZLIB_INTERNAL
 #include "zlib.h"
 

@@ -12,7 +12,6 @@
         * many cores mix to a separate buffer; no longer necessary
 
 ***************************************************************************/
-
 #include "driver.h"
 #include "sound/streams.h"
 #include "sound/wavwrite.h"
@@ -25,6 +24,8 @@
 #else
 #define VPRINTF(x)
 #endif
+
+static int finalmix_offset; //TMK ADD
 
 
 /*************************************
@@ -209,6 +210,9 @@ const struct
 #if (HAS_YM2151)
 	{ SOUND_YM2151, ym2151_get_info },
 #endif
+#if (HAS_YM2151_ORIG)
+	{ SOUND_YM2151, ym2151_get_info },
+#endif
 #if (HAS_YM2608)
 	{ SOUND_YM2608, ym2608_get_info },
 #endif
@@ -230,6 +234,11 @@ const struct
 #if (HAS_YM3812)
 	{ SOUND_YM3812, ym3812_get_info },
 #endif
+#if (HAS_YM3812_ORIG)
+	{ SOUND_YM3812, ym3812_get_info },
+#endif
+
+
 #if (HAS_YM3526)
 	{ SOUND_YM3526, ym3526_get_info },
 #endif
@@ -524,7 +533,9 @@ static UINT8 sound_matrix[SOUND_COUNT][MAX_SOUND];
 static int totalspeakers;
 static struct speaker_info speaker[MAX_SPEAKER];
 
-static INT16 *finalmix;
+//TMK static INT16 *finalmix;
+INT16 *finalmix;
+int finalmixLen, finalmixCur, finalmixCurNow, finalmixCounter;	//TMK ADD
 static INT32 *leftmix, *rightmix;
 static int samples_this_frame;
 static int global_sound_enabled;
@@ -550,6 +561,19 @@ static int route_sound(void);
 static void mixer_update(void *param, stream_sample_t **inputs, stream_sample_t **buffer, int length);
 
 
+static UINT8 sr;
+static int sr_length;
+void sr_set(int snd_rate)
+{
+	sr=snd_rate;
+	if(0 != sr){
+		sr_length=(PSP_SOUND_SAMPLES/(/*1+*/sr));
+	}else
+	{
+		sr_length=0;
+	}
+}
+
 
 /*************************************
  *
@@ -559,18 +583,29 @@ static void mixer_update(void *param, stream_sample_t **inputs, stream_sample_t 
 
 int sound_start(void)
 {
+
+	logWriteX("sound_start: entrando","","",666);
+
 	/* handle -nosound */
 	nosound_mode = (Machine->sample_rate == 0);
 	if (nosound_mode)
 		Machine->sample_rate = 11025;
 
+
+    logWriteX("sound_start: stage 0","","",666);
+
 	/* initialize the interfaces */
 	VPRINTF(("sndintrf_init\n"));
 	sndintrf_init();
 
+    logWriteX("sound_start: stage 1","","",666);
+
 	/* count the speakers */
 	for (totalspeakers = 0; Machine->drv->speaker[totalspeakers].tag; totalspeakers++) ;
 	VPRINTF(("total speakers = %d\n", totalspeakers));
+
+
+    logWriteX("sound_start: stage 2","","",666);
 
 	/* initialize the OSD layer */
 	VPRINTF(("osd_start_audio_stream\n"));
@@ -578,27 +613,51 @@ int sound_start(void)
 	if (!samples_this_frame)
 		return 1;
 
+
+    logWriteX("sound_start: stage 3","","",666);
+
 	/* allocate memory for mix buffers */
-	finalmix = auto_malloc(Machine->sample_rate * sizeof(*finalmix));
+//TMK	finalmix = auto_malloc(Machine->sample_rate * sizeof(*finalmix));
+	finalmixCur =finalmixCurNow =finalmixCounter =0;
+	finalmixLen =Machine->sample_rate;
+	finalmixLen =((finalmixLen +0x7ff) & ~0x7ff); // 2048の倍数になる様調整
+	finalmix = auto_malloc(finalmixLen * sizeof(*finalmix));
+
+
+    logWriteX("sound_start: stage 4","","",666);
+
 	leftmix = auto_malloc(Machine->sample_rate * sizeof(*leftmix));
 	rightmix = auto_malloc(Machine->sample_rate * sizeof(*rightmix));
+
+    logWriteX("sound_start: stage 5","","",666);
 
 	/* allocate a global timer for sound timing */
 	sound_update_timer = mame_timer_alloc(NULL);
 
+
+    logWriteX("sound_start: stage 6","","",666);
+
 	/* initialize the streams engine */
 	VPRINTF(("streams_init\n"));
 	streams_init();
+
+
+    logWriteX("sound_start: stage 7","","",666);
 
 	/* now start up the sound chips and tag their streams */
 	VPRINTF(("start_sound_chips\n"));
 	if (start_sound_chips())
 		return 1;
 
+    logWriteX("sound_start: stage 8","","",666);
+
 	/* then create all the speakers */
 	VPRINTF(("start_speakers\n"));
 	if (start_speakers())
 		return 1;
+
+
+    logWriteX("sound_start: stage 9","","",666);
 
 	/* finally, do all the routing */
 	VPRINTF(("route_sound\n"));
@@ -608,8 +667,11 @@ int sound_start(void)
 	if (MAKE_WAVS)
 		wavfile = wav_open("finalmix.wav", Machine->sample_rate, 2);
 
+    logWriteX("sound_start: stage 10","","",666);
+
 	global_sound_enabled = 1;
-	return 0;
+	return 0; //<-- was toqueteado
+	//return  psp_sound_start();
 }
 
 
@@ -975,6 +1037,8 @@ void sound_stop(void)
 	totalsnd = 0;
 	memset(&speaker, 0, sizeof(speaker));
 	memset(&sound, 0, sizeof(sound));
+
+	finalmix =0x00;	//TMK
 }
 
 
@@ -1111,6 +1175,8 @@ void sound_frame_update(void)
 		}
 	}
 
+//TMK ADD
+	finalmixCurNow =finalmixCur;
 	/* now downmix the final result */
 	for (sample = 0; sample < samples_this_frame; sample++)
 	{
@@ -1122,7 +1188,8 @@ void sound_frame_update(void)
 			samp = -32768;
 		else if (samp > 32767)
 			samp = 32767;
-		finalmix[sample*2+0] = samp;
+//TMK		finalmix[sample*2+0] = samp;
+		finalmix[finalmixCur++] = samp;
 
 		/* clamp the right side */
 		samp = rightmix[sample];
@@ -1130,14 +1197,25 @@ void sound_frame_update(void)
 			samp = -32768;
 		else if (samp > 32767)
 			samp = 32767;
-		finalmix[sample*2+1] = samp;
+//TMK		finalmix[sample*2+1] = samp;
+		finalmix[finalmixCur++] = samp;
+
+//TMK
+		if (finalmixCur >=finalmixLen) {
+			finalmixCur =0;
+//			finalmixCounter ++;
+//			if (finalmixCounter >1000)
+//				finalmixCounter =0;
+		}
 	}
 
 	if (wavfile)
-		wav_add_data_16(wavfile, finalmix, samples_this_frame * 2);
+		wav_add_data_16(wavfile, &finalmix[finalmixCurNow], samples_this_frame * 2);	// データは正常でない
+//TMK		wav_add_data_16(wavfile, finalmix, samples_this_frame * 2);
 
 	/* play the result */
-	samples_this_frame = osd_update_audio_stream(finalmix);
+//TMK	samples_this_frame = osd_update_audio_stream(finalmix);
+	samples_this_frame = osd_update_audio_stream(&finalmix[finalmixCurNow]);		// データは正常でない
 
 	/* update the streamer */
 	streams_frame_update();
@@ -1746,3 +1824,99 @@ void soundlatch_setclearedvalue(int value)
 {
 	latch_clear_value = value;
 }
+
+
+#if 0
+//ADDED MODEL 2
+int mame_sound_start(void)
+{
+	/* handle -nosound */
+	//nosound_mode = (machine->sample_rate == 0);
+	//if (nosound_mode){	machine->sample_rate = 5512/*11025*/;}
+	//if (0==machine->sample_rate){	machine->sample_rate = 5512;}
+	if (0==Machine->sample_rate){	Machine->sample_rate = 1024;}
+	/*1024 ヨクワカランが小さな数字(4とか)ではダメ（PSPでSOUND_OFFが実行できない） */
+//		machine->sample_rate = 11025;
+
+	/* initialize the interfaces */
+	//LOG(("sndintrf_init\n"));
+	sndintrf_init();
+
+	/* count the speakers */
+	for (totalspeakers = 0; Machine->drv->speaker[totalspeakers].tag; totalspeakers++) ;
+	//LOG(("total speakers = %d\n", totalspeakers));
+
+	/* initialize the OSD layer */
+	//LOG(("osd_start_audio_stream\n"));
+	samples_this_frame = osd_start_audio_stream(1);
+	if (!samples_this_frame)
+		return 0/*1*/;
+
+	/* allocate memory for mix buffers */
+#if (0==PSP_MAME_STREAMING_MODE)
+/* TMK 互換 */
+	finalmixLen =Machine->sample_rate;
+#if 1
+	finalmixLen =((finalmixLen +0x7ff) & ~0x7ff); // 2048の倍数になる様調整
+//	finalmixLen =((finalmixLen +0x3ff) & ~0x3ff); // 1024の倍数になる様調整
+//	finalmixLen =((finalmixLen +0x00f) & ~0x00f); //   16の倍数になる様調整
+#else
+//	if (finalmixLen&1){finalmixLen++;} // 奇数にならん様調整？？（偶数にする）
+//	if (finalmixLen&0x0f){finalmixLen+=0x10;finalmixLen&=0xffff;} // 16の倍数に調整？？(動くがノイズでダメ)
+#endif
+	finalmix = auto_malloc(finalmixLen * sizeof(*finalmix));
+
+	finalmix_offset =0;
+#endif //(0==PSP_MAME_STREAMING_MODE)
+
+
+#if 0
+//TMK	finalmix = auto_malloc(machine->sample_rate * sizeof(*finalmix));
+//	finalmix_offsetNow =0;
+//	finalmixCounter =0;
+#else
+	//#ifdef PSP_DIRECT_STREAM
+	//psp_sound_flip = 0;
+	//#endif //PSP_DIRECT_STREAM
+#endif
+
+//	leftmix  = auto_malloc(44100 * sizeof(*leftmix));
+//	rightmix = auto_malloc(44100 * sizeof(*rightmix));
+
+	leftmix  = auto_malloc(Machine->sample_rate * sizeof(*leftmix));
+#if (1==LINK_STEREO)
+	rightmix = auto_malloc(Machine->sample_rate * sizeof(*rightmix));
+#endif // (1==LINK_STEREO)
+
+	/* allocate a global timer for sound timing */
+	sound_update_timer = mame_timer_alloc(NULL);
+
+	/* initialize the streams engine */
+	//LOG(("streams_init\n"));
+	streams_init();
+
+	/* now start up the sound chips and tag their streams */
+	//LOG(("start_sound_chips\n"));
+	if (start_sound_chips())
+		return 0/*1*/;
+
+	/* then create all the speakers */
+	//LOG(("start_speakers\n"));
+	if (start_speakers())
+		return 0/*1*/;
+
+	/* finally, do all the routing */
+	//LOG(("route_sound\n"));
+	if (route_sound())
+		return 0/*1*/;
+//#if (1==MAKE_WAV)
+//	if (MAKE_WAVS) wavfile = wav_open("finalmix.wav", machine->sample_rate, 2);
+//#endif //(1==MAKE_WAV)
+//	global_sound_enabled = 1;
+//	return 1/*0*/;
+
+	//psp_sound_start();
+	global_sound_enabled = 1;
+	return 0;
+}
+#endif
